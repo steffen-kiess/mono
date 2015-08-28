@@ -821,6 +821,9 @@ namespace Mono.Unix.Native {
 		AF_ALG        = 38,  /* Algorithm sockets. */
 		AF_NFC        = 39,  /* NFC sockets. */
 		AF_VSOCK      = 40,  /* vSockets. */
+
+		// Value used when a syscall returns an unknown address family value
+		Unknown       = 65536,
 	}
 
 	[Map]
@@ -905,6 +908,20 @@ namespace Mono.Unix.Native {
 		SHUT_RD   = 0x01,   /* No more receptions. */
 		SHUT_WR   = 0x02,   /* No more transmissions. */
 		SHUT_RDWR = 0x03,   /* No more receptions or transmissions. */
+	}
+
+	// Used by libMonoPosixHelper to distinguish between different sockaddr types
+	[Map]
+	enum SockaddrType : int {
+		Invalid,
+		SockaddrStorage,
+		SockaddrUn,
+		Sockaddr,
+		SockaddrIn,
+		SockaddrIn6,
+
+		// Flag to indicate that this Sockaddr must be wrapped with a _SockaddrDynamic wrapper
+		MustBeWrapped = 0x8000,
 	}
 
 	#endregion
@@ -1416,6 +1433,129 @@ namespace Mono.Unix.Native {
 		public int l_linger;
 	}
 
+	[Map]
+	[StructLayout (LayoutKind.Sequential)]
+	[CLSCompliant (false)]
+	public struct InAddr : IEquatable<InAddr> {
+		public uint s_addr;
+
+		public InAddr (byte b0, byte b1, byte b2, byte b3)
+		{
+			s_addr = 0;
+			this[0] = b0;
+			this[1] = b1;
+			this[2] = b2;
+			this[3] = b3;
+		}
+
+		public unsafe InAddr (byte[] buffer)
+		{
+			if (buffer.Length != 4)
+				throw new ArgumentException ("buffer", "buffer.Length != 4");
+			s_addr = 0;
+			fixed (uint* ptr = &s_addr)
+				Marshal.Copy (buffer, 0, (IntPtr) ptr, 4);
+		}
+
+		public unsafe void CopyTo (byte[] destination, int startIndex)
+		{
+			fixed (uint* ptr = &s_addr)
+				Marshal.Copy ((IntPtr) ptr, destination, startIndex, 4);
+		}
+
+		public unsafe byte this[int index] {
+			get {
+				if (index < 0 || index >= 4)
+					throw new ArgumentOutOfRangeException ("index", "index < 0 || index >= 4");
+				fixed (uint* ptr = &s_addr)
+					return ((byte*) ptr)[index];
+			}
+			set {
+				if (index < 0 || index >= 4)
+					throw new ArgumentOutOfRangeException ("index", "index < 0 || index >= 4");
+				fixed (uint* ptr = &s_addr)
+					((byte*) ptr)[index] = value;
+			}
+		}
+
+		public override string ToString ()
+		{
+			return NativeConvert.ToIPAddress (this).ToString ();
+		}
+
+		public override int GetHashCode ()
+		{
+			return s_addr.GetHashCode ();
+		}
+		public override bool Equals (object obj)
+		{
+			if (!(obj is InAddr))
+				return false;
+			return Equals ((InAddr) obj);
+		}
+		public bool Equals (InAddr value)
+		{
+			return s_addr == value.s_addr;
+		}
+	}
+
+	[Map]
+	[StructLayout (LayoutKind.Sequential)]
+	public struct In6Addr : IEquatable<In6Addr> {
+		ulong addr0;
+		ulong addr1;
+
+		public unsafe In6Addr (byte[] buffer)
+		{
+			if (buffer.Length != 16)
+				throw new ArgumentException ("buffer", "buffer.Length != 16");
+			addr0 = addr1 = 0;
+			fixed (ulong* ptr = &addr0)
+				Marshal.Copy (buffer, 0, (IntPtr) ptr, 16);
+		}
+
+		public unsafe void CopyTo (byte[] destination, int startIndex)
+		{
+			fixed (ulong* ptr = &addr0)
+				Marshal.Copy ((IntPtr) ptr, destination, startIndex, 16);
+		}
+
+		public unsafe byte this[int index] {
+			get {
+				if (index < 0 || index >= 16)
+					throw new ArgumentOutOfRangeException ("index", "index < 0 || index >= 16");
+				fixed (ulong* ptr = &addr0)
+					return ((byte*) ptr)[index];
+			}
+			set {
+				if (index < 0 || index >= 16)
+					throw new ArgumentOutOfRangeException ("index", "index < 0 || index >= 16");
+				fixed (ulong* ptr = &addr0)
+					((byte*) ptr)[index] = value;
+			}
+		}
+
+		public override string ToString ()
+		{
+			return NativeConvert.ToIPAddress (this).ToString ();
+		}
+
+		public override int GetHashCode ()
+		{
+			return addr0.GetHashCode () ^ addr1.GetHashCode ();
+		}
+		public override bool Equals (object obj)
+		{
+			if (!(obj is In6Addr))
+				return false;
+			return Equals ((In6Addr) obj);
+		}
+		public bool Equals (In6Addr value)
+		{
+			return addr0 == value.addr0 && addr1 == value.addr1;
+		}
+	}
+
 	#endregion
 
 	#region Classes
@@ -1707,6 +1847,420 @@ namespace Mono.Unix.Native {
 		public static bool operator!= (Utsname lhs, Utsname rhs)
 		{
 			return !Object.Equals (lhs, rhs);
+		}
+	}
+
+	// Base class for all Sockaddr types.
+	// This class is not abstract, instances of this class can be used to determine the sa_family value.
+	// This class and all classes which are deriving from it and are passed to the native code have to be blittable.
+	[CLSCompliant (false)]
+	[StructLayout (LayoutKind.Sequential)]
+	public class Sockaddr {
+		internal SockaddrType type;
+		public UnixAddressFamily sa_family;
+
+		public Sockaddr ()
+		{
+			this.type = SockaddrType.Sockaddr;
+			this.sa_family = UnixAddressFamily.AF_UNSPEC;
+		}
+		internal Sockaddr (SockaddrType type, UnixAddressFamily sa_family)
+		{
+			this.type = type;
+			this.sa_family = sa_family;
+		}
+
+		[DllImport (Syscall.MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Sockaddr_GetNativeSize")]
+		static extern int GetNativeSize (ref _SockaddrDynamic address, out long size);
+		[DllImport (Syscall.MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Sockaddr_GetNativeSize")]
+		static extern int GetNativeSize (Sockaddr address, out long size);
+		public unsafe long GetNativeSize ()
+		{
+			long size;
+			if (this != null && this.IsDynamic) {
+				fixed (byte* data = this.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (this, data, false);
+					if (GetNativeSize (ref dyn, out size) != 0)
+						throw new ArgumentException ("this", "Failed to get size of native struct");
+				}
+			} else {
+				if (GetNativeSize (this, out size) != 0)
+					throw new ArgumentException ("this", "Failed to get size of native struct");
+			}
+			return size;
+		}
+
+		internal bool IsDynamic {
+			get {
+				return (type & SockaddrType.MustBeWrapped) != 0;
+			}
+		}
+		// This methods should only be called for SockaddrStorage and SockaddrUn where they are overwritten
+		internal virtual byte[] DynamicData () {
+			throw new NotImplementedException ();
+		}
+		internal virtual long GetDynamicLength () {
+			throw new NotImplementedException ();
+		}
+		internal virtual void SetDynamicLength (long value) {
+			throw new NotImplementedException ();
+		}
+
+		public SockaddrStorage ToSockaddrStorage ()
+		{
+			var storage = new SockaddrStorage ((int) GetNativeSize ());
+			storage.SetTo (this);
+			return storage;
+		}
+		public static Sockaddr FromSockaddrStorage (SockaddrStorage storage)
+		{
+			var ret = new Sockaddr ();
+			storage.CopyTo (ret);
+			return ret;
+		}
+	}
+
+	// This struct is required to manually marshal Sockaddr* classes which include an array (currently SockaddrStorage and SockaddrUn).
+	// This is needed because the marshalling code will not work if the classes derived from Sockaddr aren't blittable.
+	[Map]
+	unsafe struct _SockaddrDynamic {
+		// Note: the layout of the first members must match the layout of class Sockaddr
+		public SockaddrType type;
+		public UnixAddressFamily sa_family;
+		public byte* data;
+		public long len;
+
+		public _SockaddrDynamic (Sockaddr address, byte* data, bool useMaxLength)
+		{
+			var dynData = address.DynamicData ();
+
+			type = address.type & ~SockaddrType.MustBeWrapped;
+			sa_family = address.sa_family;
+			this.data = data;
+			if (useMaxLength) {
+				len = dynData.Length;
+			} else {
+				len = address.GetDynamicLength ();
+				if (len < 0 || len > dynData.Length)
+					throw new ArgumentException ("address", "len < 0 || len > dynData.Length");
+			}
+		}
+
+		public void Update (Sockaddr address)
+		{
+			address.sa_family = sa_family;
+			address.SetDynamicLength (len);
+		}
+	};
+
+	// This is a class which can store arbitrary sockaddrs, even if they are not known the the Mono.Unix wrapper or the family does not have a corresponding value in the UnixAddressFamily enumeration.
+	[CLSCompliant (false)]
+	public class SockaddrStorage : Sockaddr, IEquatable<SockaddrStorage> {
+		// Note: The sa_family field is ignored when passing a SockaddrStorage to a syscall (but it will be set when a SockaddrStorage is returned from a syscall). Instead of the sa_family field the value embedded in data is used.
+		public byte[] data;
+		public long data_len;
+
+		internal override byte[] DynamicData () {
+			return data;
+		}
+		internal override long GetDynamicLength () {
+			return data_len;
+		}
+		internal override void SetDynamicLength (long value) {
+			data_len = value;
+		}
+
+		[DllImport (Syscall.MPH, SetLastError=true,
+				EntryPoint="Mono_Posix_SockaddrStorage_get_size")]
+		static extern int get_size ();
+		static readonly int default_size = get_size ();
+
+		public SockaddrStorage () : base (SockaddrType.SockaddrStorage | SockaddrType.MustBeWrapped, UnixAddressFamily.AF_UNSPEC)
+		{
+			data = new byte[default_size];
+			data_len = 0;
+		}
+		public SockaddrStorage (int size) : base (SockaddrType.SockaddrStorage | SockaddrType.MustBeWrapped, UnixAddressFamily.AF_UNSPEC)
+		{
+			data = new byte[size];
+			data_len = 0;
+		}
+
+		public unsafe void SetTo (Sockaddr address)
+		{
+			if (address == null)
+				throw new ArgumentNullException ("address");
+
+			var size = address.GetNativeSize ();
+			if (size > data.Length)
+				data = new byte[size];
+			fixed (byte* ptr = data)
+				if (!NativeConvert.TryCopy (address, (IntPtr) ptr))
+					throw new ArgumentException ("address", "Failed to convert to native struct");
+			data_len = size;
+			sa_family = address.sa_family;
+		}
+
+		public unsafe void CopyTo (Sockaddr address)
+		{
+			if (address == null)
+				throw new ArgumentNullException ("address");
+			if (data_len < 0 || data_len > data.Length)
+				throw new ArgumentException ("this", "data_len < 0 || data_len > data.Length");
+
+			fixed (byte* ptr = data)
+				if (!NativeConvert.TryCopy ((IntPtr) ptr, data_len, address))
+					throw new ArgumentException ("this", "Failed to convert from native struct");
+		}
+
+		public override string ToString ()
+		{
+			var sb = new StringBuilder ();
+			sb.AppendFormat ("{{sa_family={0}, data_len={1}, data=(", sa_family, data_len);
+			for (int i = 0; i < data_len; i++) {
+				if (i != 0)
+					sb.Append (" ");
+				sb.Append (data[i].ToString ("x2"));
+			}
+			sb.Append (")");
+			return sb.ToString ();
+		}
+
+		public override int GetHashCode ()
+		{
+			unchecked {
+				int hash = 0x1234;
+				for (int i = 0; i < data_len; i++)
+					hash += i ^ data[i];
+				return hash;
+			}
+		}
+		public override bool Equals (object obj)
+		{
+			if (!(obj is SockaddrStorage))
+				return false;
+			return Equals ((SockaddrStorage) obj);
+		}
+		public bool Equals (SockaddrStorage value)
+		{
+			if (value == null)
+				return false;
+			if (data_len != value.data_len)
+				return false;
+			for (int i = 0; i < data_len; i++)
+				if (data[i] != value.data[i])
+					return false;
+			return true;
+		}
+	}
+
+	[CLSCompliant (false)]
+	public class SockaddrUn : Sockaddr, IEquatable<SockaddrUn> {
+		public UnixAddressFamily sun_family { // AF_UNIX
+			get {
+				return sa_family;
+			}
+			set {
+				sa_family = value;
+			}
+		}
+		public byte[] sun_path;
+		public long sun_path_len; // Indicates how many bytes of sun_path are valid. Must not be larger than sun_path.Length.
+
+		internal override byte[] DynamicData () {
+			return sun_path;
+		}
+		internal override long GetDynamicLength () {
+			return sun_path_len;
+		}
+		internal override void SetDynamicLength (long value) {
+			sun_path_len = value;
+		}
+
+		[DllImport (Syscall.MPH, SetLastError=true,
+				EntryPoint="Mono_Posix_SockaddrUn_get_sizeof_sun_path")]
+		static extern int get_sizeof_sun_path ();
+		static readonly int sizeof_sun_path = get_sizeof_sun_path ();
+
+		public SockaddrUn () : base (SockaddrType.SockaddrUn | SockaddrType.MustBeWrapped, UnixAddressFamily.AF_UNIX)
+		{
+			sun_path = new byte[sizeof_sun_path];
+			sun_path_len = 0;
+		}
+		public SockaddrUn (int size) : base (SockaddrType.SockaddrUn | SockaddrType.MustBeWrapped, UnixAddressFamily.AF_UNIX)
+		{
+			sun_path = new byte[size];
+			sun_path_len = 0;
+		}
+		public SockaddrUn (string path, bool @abstract = false) : base (SockaddrType.SockaddrUn | SockaddrType.MustBeWrapped, UnixAddressFamily.AF_UNIX)
+		{
+			var bytes = UnixEncoding.Instance.GetBytes (path);
+			if (@abstract) {
+				sun_path = new byte[1 + bytes.Length];
+				Array.Copy (bytes, 0, sun_path, 1, bytes.Length);
+			} else {
+				sun_path = bytes;
+			}
+			sun_path_len = sun_path.Length;
+		}
+
+		public bool IsAbstract {
+			get {
+				return sun_path_len > 0 && sun_path[0] == 0;
+			}
+		}
+		public string Path {
+			get {
+				var offset = IsAbstract ? 1 : 0;
+				// Remove data after null terminator
+				int length;
+				for (length = 0; offset + length < sun_path_len; length++)
+					if (sun_path[offset + length] == 0)
+						break;
+				return UnixEncoding.Instance.GetString (sun_path, offset, length);
+			}
+		}
+
+		public override string ToString ()
+		{
+			return string.Format ("{{sa_family={0}, sun_path=\"{1}{2}\"}}", sa_family, IsAbstract ? "\\0" : "", Path);
+		}
+
+		public static new SockaddrUn FromSockaddrStorage (SockaddrStorage storage)
+		{
+			// This will make the SockaddrUn larger than it needs to be (because
+			// storage.data_len includes the sun_family field), but it will be
+			// large enough.
+			var ret = new SockaddrUn ((int) storage.data_len);
+			storage.CopyTo (ret);
+			return ret;
+		}
+
+		public override int GetHashCode ()
+		{
+			return sun_family.GetHashCode () ^ IsAbstract.GetHashCode () ^ Path.GetHashCode ();
+		}
+		public override bool Equals (object obj)
+		{
+			if (!(obj is SockaddrUn))
+				return false;
+			return Equals ((SockaddrUn) obj);
+		}
+		public bool Equals (SockaddrUn value)
+		{
+			if (value == null)
+				return false;
+			return sun_family == value.sun_family
+				&& IsAbstract == value.IsAbstract
+				&& Path == value.Path;
+		}
+	}
+
+	[Map ("struct sockaddr_in")]
+	[CLSCompliant (false)]
+	[StructLayout (LayoutKind.Sequential)]
+	public class SockaddrIn : Sockaddr, IEquatable<SockaddrIn> {
+		public UnixAddressFamily sin_family { // AF_INET
+			get {
+				return sa_family;
+			}
+			set {
+				sa_family = value;
+			}
+		}
+		public ushort sin_port;   // Port number.
+		public InAddr sin_addr;   // IP address.
+
+		public SockaddrIn () : base (SockaddrType.SockaddrIn, UnixAddressFamily.AF_INET)
+		{
+		}
+
+		public override string ToString ()
+		{
+			return string.Format ("{{sin_family={0}, sin_port=htons({1}), sin_addr={2}}}", sa_family, Syscall.ntohs(sin_port), sin_addr);
+		}
+
+		public static new SockaddrIn FromSockaddrStorage (SockaddrStorage storage)
+		{
+			var ret = new SockaddrIn ();
+			storage.CopyTo (ret);
+			return ret;
+		}
+
+		public override int GetHashCode ()
+		{
+			return sin_family.GetHashCode () ^ sin_port.GetHashCode () ^ sin_addr.GetHashCode ();
+		}
+		public override bool Equals (object obj)
+		{
+			if (!(obj is SockaddrIn))
+				return false;
+			return Equals ((SockaddrIn) obj);
+		}
+		public bool Equals (SockaddrIn value)
+		{
+			if (value == null)
+				return false;
+			return sin_family == value.sin_family
+				&& sin_port == value.sin_port
+				&& sin_addr.Equals (value.sin_addr);
+		}
+	}
+
+	[Map ("struct sockaddr_in6")]
+	[CLSCompliant (false)]
+	[StructLayout (LayoutKind.Sequential)]
+	public class SockaddrIn6 : Sockaddr, IEquatable<SockaddrIn6> {
+		public UnixAddressFamily sin6_family { // AF_INET6
+			get {
+				return sa_family;
+			}
+			set {
+				sa_family = value;
+			}
+		}
+		public ushort  sin6_port;     // Port number.
+		public uint    sin6_flowinfo; // IPv6 traffic class and flow information.
+		public In6Addr sin6_addr;     // IPv6 address.
+		public uint    sin6_scope_id; // Set of interfaces for a scope.
+
+		public SockaddrIn6 () : base (SockaddrType.SockaddrIn6, UnixAddressFamily.AF_INET6)
+		{
+		}
+
+		public override string ToString ()
+		{
+			return string.Format ("{{sin6_family={0}, sin6_port=htons({1}), sin6_flowinfo={2}, sin6_addr={3}, sin6_scope_id={4}}}", sa_family, Syscall.ntohs (sin6_port), sin6_flowinfo, sin6_addr, sin6_scope_id);
+		}
+
+		public static new SockaddrIn6 FromSockaddrStorage (SockaddrStorage storage)
+		{
+			var ret = new SockaddrIn6 ();
+			storage.CopyTo (ret);
+			return ret;
+		}
+
+		public override int GetHashCode ()
+		{
+			return sin6_family.GetHashCode () ^ sin6_port.GetHashCode () ^ sin6_flowinfo.GetHashCode () ^ sin6_addr.GetHashCode () ^ sin6_scope_id.GetHashCode ();
+		}
+		public override bool Equals (object obj)
+		{
+			if (!(obj is SockaddrIn6))
+				return false;
+			return Equals ((SockaddrIn6) obj);
+		}
+		public bool Equals (SockaddrIn6 value)
+		{
+			if (value == null)
+				return false;
+			return sin6_family == value.sin6_family
+				&& sin6_port == value.sin6_port
+				&& sin6_flowinfo == value.sin6_flowinfo
+				&& sin6_addr.Equals (value.sin6_addr)
+				&& sin6_scope_id == value.sin6_scope_id;
 		}
 	}
 
@@ -4545,6 +5099,33 @@ namespace Mono.Unix.Native {
 		}
 		#endregion
 
+		#region <arpa/inet.h> Declarations
+		//
+		// <arpa/inet.h>
+		//
+
+		// htonl(3)
+		//    uint32_t htonl(uint32_t hostlong);
+		[DllImport (LIBC)]
+		public static extern uint htonl(uint hostlong);
+
+		// htons(3)
+		//    uint16_t htons(uint16_t hostshort);
+		[DllImport (LIBC)]
+		public static extern ushort htons(ushort hostshort);
+
+		// ntohl(3)
+		//    uint32_t ntohl(uint32_t netlong);
+		[DllImport (LIBC)]
+		public static extern uint ntohl(uint netlong);
+
+		// ntohs(3)
+		//    uint16_t ntohs(uint16_t netshort);
+		[DllImport (LIBC)]
+		public static extern ushort ntohs(ushort netshort);
+
+		#endregion
+
 		#region <socket.h> Declarations
 		//
 		// <socket.h>
@@ -4780,6 +5361,221 @@ namespace Mono.Unix.Native {
 				return send (socket, ptr, length, flags);
 		}
 
+		// bind(2)
+		//    int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_bind")]
+		static extern int sys_bind (int socket, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_bind")]
+		static extern int sys_bind (int socket, Sockaddr address);
+
+		public static unsafe int bind (int socket, Sockaddr address)
+		{
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, false);
+					return sys_bind (socket, ref dyn);
+				}
+			} else {
+				return sys_bind (socket, address);
+			}
+		}
+
+		// connect(2)
+		//    int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_connect")]
+		static extern int sys_connect (int socket, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_connect")]
+		static extern int sys_connect (int socket, Sockaddr address);
+
+		public static unsafe int connect (int socket, Sockaddr address)
+		{
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, false);
+					return sys_connect (socket, ref dyn);
+				}
+			} else {
+				return sys_connect (socket, address);
+			}
+		}
+
+		// accept(2)
+		//    int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_accept")]
+		static extern int sys_accept (int socket, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_accept")]
+		static extern int sys_accept (int socket, Sockaddr address);
+
+		public static unsafe int accept (int socket, Sockaddr address)
+		{
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, true);
+					int r = sys_accept (socket, ref dyn);
+					dyn.Update (address);
+					return r;
+				}
+			} else {
+				return sys_accept (socket, address);
+			}
+		}
+
+		// accept4(2)
+		//    int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_accept4")]
+		static extern int sys_accept4 (int socket, ref _SockaddrDynamic address, int flags);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_accept4")]
+		static extern int sys_accept4 (int socket, Sockaddr address, int flags);
+
+		public static unsafe int accept4 (int socket, Sockaddr address, UnixSocketFlags flags)
+		{
+			var _flags = NativeConvert.FromUnixSocketFlags (flags);
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, true);
+					int r = sys_accept4 (socket, ref dyn, _flags);
+					dyn.Update (address);
+					return r;
+				}
+			} else {
+				return sys_accept4 (socket, address, _flags);
+			}
+		}
+
+		// getpeername(2)
+		//    int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_getpeername")]
+		static extern int sys_getpeername (int socket, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_getpeername")]
+		static extern int sys_getpeername (int socket, Sockaddr address);
+
+		public static unsafe int getpeername (int socket, Sockaddr address)
+		{
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, true);
+					int r = sys_getpeername (socket, ref dyn);
+					dyn.Update (address);
+					return r;
+				}
+			} else {
+				return sys_getpeername (socket, address);
+			}
+		}
+
+		// getsockname(2)
+		//    int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_getsockname")]
+		static extern int sys_getsockname (int socket, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_getsockname")]
+		static extern int sys_getsockname (int socket, Sockaddr address);
+
+		public static unsafe int getsockname (int socket, Sockaddr address)
+		{
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, true);
+					int r = sys_getsockname (socket, ref dyn);
+					dyn.Update (address);
+					return r;
+				}
+			} else {
+				return sys_getsockname (socket, address);
+			}
+		}
+
+		// recvfrom(2)
+		//    ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_recvfrom")]
+		static extern unsafe long sys_recvfrom (int socket, void *buffer, ulong length, int flags, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_recvfrom")]
+		static extern unsafe long sys_recvfrom (int socket, void *buffer, ulong length, int flags, Sockaddr address);
+
+		public static unsafe long recvfrom (int socket, void *buffer, ulong length, MessageFlags flags, Sockaddr address)
+		{
+			int _flags = NativeConvert.FromMessageFlags (flags);
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, true);
+					long r = sys_recvfrom (socket, buffer, length, _flags, ref dyn);
+					dyn.Update (address);
+					return r;
+				}
+			} else {
+				return sys_recvfrom (socket, buffer, length, _flags, address);
+			}
+		}
+
+		public static unsafe long recvfrom (int socket, IntPtr buffer, ulong length, MessageFlags flags, Sockaddr address)
+		{
+			return recvfrom (socket, (void*) buffer, length, flags, address);
+		}
+
+		public static unsafe long recvfrom (int socket, byte[] buffer, ulong length, MessageFlags flags, Sockaddr address)
+		{
+			if (length > (ulong) buffer.LongLength)
+				throw new ArgumentOutOfRangeException ("length", "length > buffer.LongLength");
+			fixed (byte* ptr = buffer)
+				return recvfrom (socket, ptr, length, flags, address);
+		}
+
+		// sendto(2)
+		//    ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen);
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_sendto")]
+		static extern unsafe long sys_sendto (int socket, void *message, ulong length, int flags, ref _SockaddrDynamic address);
+
+		[DllImport (MPH, SetLastError=true, 
+				EntryPoint="Mono_Posix_Syscall_sendto")]
+		static extern unsafe long sys_sendto (int socket, void *message, ulong length, int flags, Sockaddr address);
+
+		public static unsafe long sendto (int socket, void *message, ulong length, MessageFlags flags, Sockaddr address)
+		{
+			int _flags = NativeConvert.FromMessageFlags (flags);
+			if (address != null && address.IsDynamic) {
+				fixed (byte* data = address.DynamicData ()) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (address, data, false);
+					return sys_sendto (socket, message, length, _flags, ref dyn);
+				}
+			} else {
+				return sys_sendto (socket, message, length, _flags, address);
+			}
+		}
+
+		public static unsafe long sendto (int socket, IntPtr message, ulong length, MessageFlags flags, Sockaddr address)
+		{
+			return sendto (socket, (void*) message, length, flags, address);
+		}
+
+		public static unsafe long sendto (int socket, byte[] message, ulong length, MessageFlags flags, Sockaddr address)
+		{
+			if (length > (ulong) message.LongLength)
+				throw new ArgumentOutOfRangeException ("length", "length > message.LongLength");
+			fixed (byte* ptr = message)
+				return sendto (socket, ptr, length, flags, address);
+		}
+
 		#endregion
 	}
 
@@ -4787,3 +5583,8 @@ namespace Mono.Unix.Native {
 }
 
 // vim: noexpandtab
+// Local Variables: 
+// tab-width: 4
+// c-basic-offset: 4
+// indent-tabs-mode: t
+// End: 

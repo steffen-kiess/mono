@@ -359,7 +359,129 @@ namespace Mono.Unix.Native {
 		{
 			return ToStatvfs (source, out destination) == 0;
 		}
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_FromInAddr")]
+		private static extern int FromInAddr (ref InAddr source, IntPtr destination);
+
+		public static bool TryCopy (ref InAddr source, IntPtr destination)
+		{
+			return FromInAddr (ref source, destination) == 0;
+		}
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_ToInAddr")]
+		private static extern int ToInAddr (IntPtr source, out InAddr destination);
+
+		public static bool TryCopy (IntPtr source, out InAddr destination)
+		{
+			return ToInAddr (source, out destination) == 0;
+		}
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_FromIn6Addr")]
+		private static extern int FromIn6Addr (ref In6Addr source, IntPtr destination);
+
+		public static bool TryCopy (ref In6Addr source, IntPtr destination)
+		{
+			return FromIn6Addr (ref source, destination) == 0;
+		}
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_ToIn6Addr")]
+		private static extern int ToIn6Addr (IntPtr source, out In6Addr destination);
+
+		public static bool TryCopy (IntPtr source, out In6Addr destination)
+		{
+			return ToIn6Addr (source, out destination) == 0;
+		}
+
+		public static InAddr ToInAddr (System.Net.IPAddress address)
+		{
+			if (address == null)
+				throw new ArgumentNullException ("address");
+			if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+				throw new ArgumentException ("address", "address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork");
+			return new InAddr (address.GetAddressBytes ());
+		}
+
+		public static System.Net.IPAddress ToIPAddress (InAddr address)
+		{
+			var bytes = new byte[4];
+			address.CopyTo (bytes, 0);
+			return new System.Net.IPAddress (bytes);
+		}
+
+		public static In6Addr ToIn6Addr (System.Net.IPAddress address)
+		{
+			if (address == null)
+				throw new ArgumentNullException ("address");
+			if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6)
+				throw new ArgumentException ("address", "address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6");
+			return new In6Addr (address.GetAddressBytes ());
+		}
+
+		public static System.Net.IPAddress ToIPAddress (In6Addr address)
+		{
+			var bytes = new byte[16];
+			address.CopyTo (bytes, 0);
+			return new System.Net.IPAddress (bytes);
+		}
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_FromSockaddr")]
+		private static extern int FromSockaddr (ref _SockaddrDynamic source, IntPtr destination);
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_FromSockaddr")]
+		private static extern int FromSockaddr (Sockaddr source, IntPtr destination);
+
+		public static unsafe bool TryCopy (Sockaddr source, IntPtr destination)
+		{
+			if (source == null)
+				throw new ArgumentNullException ("source");
+			if (source.IsDynamic) {
+				var array = source.DynamicData ();
+				// SockaddrStorage has to be handled extra because the native code assumes that SockaddrStorage input is used in-place
+				if (source.type == (SockaddrType.SockaddrStorage | SockaddrType.MustBeWrapped)) {
+					Marshal.Copy (array, 0, destination, (int) source.GetDynamicLength ());
+					return true;
+				}
+				fixed (byte* data = array) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (source, data, false);
+					return FromSockaddr (ref dyn, destination) == 0;
+				}
+			} else {
+				return FromSockaddr (source, destination) == 0;
+			}
+		}
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_ToSockaddr")]
+		private static extern int ToSockaddr (IntPtr source, long size, ref _SockaddrDynamic destination);
+
+		[DllImport (LIB, EntryPoint="Mono_Posix_ToSockaddr")]
+		private static extern int ToSockaddr (IntPtr source, long size, Sockaddr destination);
+
+		public static unsafe bool TryCopy (IntPtr source, long size, Sockaddr destination)
+		{
+			if (destination == null)
+				throw new ArgumentNullException ("destination");
+			if (destination.IsDynamic) {
+				var array = destination.DynamicData ();
+				fixed (byte* data = array) {
+					_SockaddrDynamic dyn = new _SockaddrDynamic (destination, data, true);
+					var r = ToSockaddr (source, size, ref dyn);
+					dyn.Update (destination);
+					// SockaddrStorage has to be handled extra because the native code assumes that SockaddrStorage input is used in-place
+					if (r == 0 && destination.type == (SockaddrType.SockaddrStorage | SockaddrType.MustBeWrapped)) {
+						Marshal.Copy (source, array, 0, (int) destination.GetDynamicLength ());
+					}
+					return r == 0;
+				}
+			} else {
+				return ToSockaddr (source, size, destination) == 0;
+			}
+		}
 	}
 }
 
 // vim: noexpandtab
+// Local Variables: 
+// tab-width: 4
+// c-basic-offset: 4
+// indent-tabs-mode: t
+// End: 
