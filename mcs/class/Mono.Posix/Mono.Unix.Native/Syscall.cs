@@ -4709,6 +4709,12 @@ namespace Mono.Unix.Native {
 		[DllImport (LIBC, SetLastError=true)]
 		public static extern int getpid ();
 
+		// gettid(2)
+		//    pid_t gettid(void);
+		// This is available since glibc 2.30.
+		[DllImport (LIBC, SetLastError=true)]
+		public static extern int gettid ();
+
 		// getppid(2)
 		//    pid_t getppid(void);
 		[DllImport (LIBC, SetLastError=true)]
